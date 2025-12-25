@@ -1,0 +1,23 @@
+# FastAPI и веб-сервер
+fastapi==0.115.5
+uvicorn[standard]==0.34.0
+python-multipart==0.0.18
+
+# PyTorch и Transformers
+torch==2.5.1
+torchvision==0.20.1
+transformers==4.47.1
+accelerate==1.2.1
+
+# Работа с изображениями и PDF
+Pillow==11.0.0
+pdf2image==1.17.0
+pypdf==5.1.0
+
+# Дополнительные утилиты
+python-dotenv==1.0.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+addict==2.4.0
+einops==0.8.1
+easydict==1.13
