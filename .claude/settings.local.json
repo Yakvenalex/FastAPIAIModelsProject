@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(ls:*)",
+      "Bash(nginx -t:*)",
+      "Bash(systemctl reload:*)"
+    ]
+  }
+}

@@ -23,7 +23,12 @@ def get_ocr_model() -> DeepSeekOCR:
         ocr_model = DeepSeekOCR(
             model_name=settings.deepseek_ocr_model,
             device=settings.device,
-            cache_dir=settings.cache_dir
+            cache_dir=settings.cache_dir,
+            base_size=settings.ocr_base_size,
+            image_size=settings.ocr_image_size,
+            max_image_size=settings.ocr_max_image_size,
+            use_torch_compile=settings.ocr_use_torch_compile,
+            use_bfloat16=settings.ocr_use_bfloat16
         )
         ocr_model.load()
     return ocr_model
@@ -31,33 +36,41 @@ def get_ocr_model() -> DeepSeekOCR:
 
 @router.post("/extract-text", response_model=Dict[str, str])
 async def extract_text(
-    file: UploadFile = File(..., description="Изображение (PNG, JPG) или PDF файл")
+    file: UploadFile = File(..., description="Изображение (PNG, JPG, WebP) или PDF файл")
 ) -> Dict[str, str]:
     """
     Распознавание текста на изображении или PDF файле
 
     Args:
-        file: Загруженный файл (изображение или PDF)
+        file: Загруженный файл (изображение PNG, JPG, WebP или PDF)
 
     Returns:
         Словарь с распознанным текстом и информацией о файле
     """
     # Проверяем тип файла
     allowed_types = {
-        "image/png", "image/jpeg", "image/jpg",
+        "image/png", "image/jpeg", "image/jpg", "image/webp",
         "application/pdf"
     }
 
     if file.content_type not in allowed_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Неподдерживаемый формат файла. Разрешены: PNG, JPG, PDF"
+            detail=f"Неподдерживаемый формат файла. Разрешены: PNG, JPG, WebP, PDF"
         )
 
     try:
         # Читаем файл
         contents = await file.read()
         logger.info(f"Получен файл: {file.filename}, размер: {len(contents)} байт")
+
+        # Проверяем размер файла (50MB лимит)
+        max_size = 50 * 1024 * 1024  # 50MB
+        if len(contents) > max_size:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Файл слишком большой. Максимальный размер: 50MB"
+            )
 
         # Определяем тип файла
         is_pdf = file.content_type == "application/pdf"

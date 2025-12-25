@@ -42,9 +42,25 @@ class DeepSeekOCR(BaseModel):
     Модель для распознавания текста (OCR) с использованием DeepSeek-OCR
     """
 
-    def __init__(self, model_name: str, device: str = "cuda", cache_dir: str = "./models_cache"):
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cuda",
+        cache_dir: str = "./models_cache",
+        base_size: int = 384,
+        image_size: int = 256,
+        max_image_size: int = 2048,
+        use_torch_compile: bool = True,
+        use_bfloat16: bool = True
+    ):
         super().__init__(model_name, device, cache_dir)
         self.tokenizer = None
+        self.base_size = base_size
+        self.image_size = image_size
+        self.max_image_size = max_image_size
+        self.use_torch_compile = use_torch_compile
+        self.use_bfloat16 = use_bfloat16
+        self._is_compiled = False
 
     def unload(self):
         """Выгрузка модели из памяти"""
@@ -52,6 +68,7 @@ class DeepSeekOCR(BaseModel):
         if self.tokenizer is not None:
             del self.tokenizer
             self.tokenizer = None
+        self._is_compiled = False
 
     def load(self):
         """Загрузка модели и токенизатора в видеопамять"""
@@ -74,12 +91,15 @@ class DeepSeekOCR(BaseModel):
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-            # Загружаем модель на GPU
+            # Загружаем модель на GPU с оптимизациями
+            torch_dtype = torch.bfloat16 if (self.device == "cuda" and self.use_bfloat16) else torch.float32
+
             self.model = AutoModel.from_pretrained(
                 self.model_name,
                 cache_dir=self.cache_dir,
                 trust_remote_code=True,
-                torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
+                use_safetensors=True,
+                torch_dtype=torch_dtype
             )
 
             # Настраиваем generation_config модели
@@ -96,6 +116,24 @@ class DeepSeekOCR(BaseModel):
             self.model = self.model.eval()
             if self.device == "cuda":
                 self.model = self.model.cuda()
+                # Явно применяем bfloat16 если включено (как в документации)
+                if self.use_bfloat16:
+                    self.model = self.model.to(torch.bfloat16)
+                    logger.info("Модель переведена в bfloat16 для экономии памяти и ускорения")
+
+            # Применяем torch.compile для ускорения (если включено)
+            if self.use_torch_compile and self.device == "cuda":
+                try:
+                    logger.info("Применяем torch.compile для ускорения инференса...")
+                    # Настраиваем torch._dynamo для подавления ошибок
+                    if hasattr(torch, '_dynamo'):
+                        torch._dynamo.config.suppress_errors = True
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    self._is_compiled = True
+                    logger.info("torch.compile успешно применён")
+                except Exception as e:
+                    logger.warning(f"Не удалось применить torch.compile: {e}. Продолжаем без компиляции.")
+                    self._is_compiled = False
 
             logger.info(f"Модель {self.model_name} успешно загружена на {self.device}")
 
@@ -153,6 +191,23 @@ class DeepSeekOCR(BaseModel):
         images = convert_from_bytes(pdf_bytes)
         logger.info(f"PDF содержит {len(images)} страниц")
         return images
+
+    def _resize_if_needed(self, image: Image.Image) -> Image.Image:
+        """
+        Автоматический resize изображения если оно слишком большое
+        Сохраняет пропорции изображения
+        """
+        width, height = image.size
+        max_dim = max(width, height)
+
+        if max_dim > self.max_image_size:
+            scale = self.max_image_size / max_dim
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            logger.info(f"Уменьшение изображения с {width}x{height} до {new_width}x{new_height} для ускорения")
+            return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        return image
 
     def _clean_ocr_output(self, text: str) -> str:
         """
@@ -224,6 +279,9 @@ class DeepSeekOCR(BaseModel):
         output_dir = os.path.join(tempfile.gettempdir(), f"ocr_out_{unique_id}")
 
         try:
+            # Автоматически уменьшаем изображение если оно слишком большое
+            image = self._resize_if_needed(image)
+
             # Сохраняем изображение
             image.save(tmp_path, format='JPEG')
 
@@ -246,8 +304,8 @@ class DeepSeekOCR(BaseModel):
                         prompt=prompt,
                         image_file=tmp_path,
                         output_path=output_dir,
-                        base_size=512,  # Уменьшено с 1024 для скорости
-                        image_size=384,  # Уменьшено с 640 для скорости
+                        base_size=self.base_size,  # Используем параметр из конфига
+                        image_size=self.image_size,  # Используем параметр из конфига
                         crop_mode=False,  # Отключаем crop для скорости
                         save_results=False,
                         test_compress=False

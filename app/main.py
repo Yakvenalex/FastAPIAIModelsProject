@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 
 from app.config import get_settings
-from app.routers import ocr
+from app.routers import ocr, asr, tts, chat
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,6 +32,12 @@ async def lifespan(app: FastAPI):
     logger.info("Загрузка моделей в память...")
     # Предзагружаем OCR модель
     ocr.get_ocr_model()
+    # Предзагружаем ASR модель
+    asr.get_asr_model()
+    # Предзагружаем TTS модель
+    tts.get_tts_model()
+    # Предзагружаем Chat модель
+    chat.get_chat_model()
     logger.info("Все модели загружены и готовы к работе!")
 
     yield
@@ -40,6 +46,12 @@ async def lifespan(app: FastAPI):
     logger.info("Остановка приложения...")
     if ocr.ocr_model is not None:
         ocr.ocr_model.unload()
+    if asr.asr_model is not None:
+        asr.asr_model.unload()
+    if tts.tts_model is not None:
+        tts.tts_model.unload()
+    if chat.chat_model is not None:
+        chat.chat_model.unload()
     logger.info("Приложение остановлено")
 
 
@@ -47,7 +59,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="FastAPI приложение для работы с AI моделями (DeepSeek OCR и другие)",
+    description="FastAPI приложение для работы с AI моделями (DeepSeek OCR, Whisper ASR и другие)",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -64,6 +76,9 @@ app.add_middleware(
 
 # Подключаем роутеры
 app.include_router(ocr.router)
+app.include_router(asr.router)
+app.include_router(tts.router)
+app.include_router(chat.router)
 
 
 @app.get("/", tags=["Health"])
@@ -75,7 +90,10 @@ async def root():
         "status": "running",
         "docs": "/docs",
         "available_endpoints": {
-            "ocr": "/ocr/extract-text - распознавание текста на изображениях и PDF",
+            "ocr": "/ocr/extract-text - распознавание текста на изображениях (PNG, JPG, WebP) и PDF",
+            "asr": "/asr/transcribe - распознавание речи из аудиофайлов (WAV, MP3, FLAC, OGG, M4A и др.)",
+            "tts": "/tts/synthesize - синтез речи из текста (Text-to-Speech)",
+            "chat": "/chat/simple - чат с AI ассистентом (вопросы, улучшение текста и т.д.)",
         }
     }
 
