@@ -60,24 +60,22 @@ class MMSTTS(BaseModel):
                 cache_dir=self.cache_dir
             )
 
-            # Загружаем модель (VITS архитектура)
-            # Для MMS TTS не используем явное указание dtype при загрузке
+            # VITS модель НЕ поддерживает device_map="auto"
+            # Загружаем напрямую на устройство
             self.model = VitsModel.from_pretrained(
                 self.model_name,
                 cache_dir=self.cache_dir,
                 low_cpu_mem_usage=True
             )
 
+            # Переносим на устройство вручную
+            if self.device == "cuda":
+                self.model = self.model.to(self.device)
+                logger.info(f"TTS модель загружена на {self.device}")
+
             # Переводим модель в режим инференса
             self.model.eval()
-
-            # Переносим на устройство
-            if self.device == "cuda":
-                self.model = self.model.cuda()
-                # Применяем bfloat16 после переноса на GPU (если включено)
-                if self.use_bfloat16:
-                    self.model = self.model.to(torch.bfloat16)
-                    logger.info("Модель переведена в bfloat16 для экономии памяти")
+            logger.info("MMS TTS модель распределена между GPU и CPU")
 
             logger.info(f"Модель {self.model_name} успешно загружена на {self.device}")
 

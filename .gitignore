@@ -4,7 +4,10 @@ venv/
 env/
 ENV/
 
+# Игнорирование кэша
 models_cache/
+offload_cache/
+
 # Игнорирование файлов с окружением
 #.env
 #.env.*

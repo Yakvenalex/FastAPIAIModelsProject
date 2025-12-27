@@ -69,24 +69,30 @@ class WhisperASR(BaseModel):
             # Определяем тип данных
             torch_dtype = torch.bfloat16 if (self.device == "cuda" and self.use_bfloat16) else torch.float32
 
-            # Загружаем модель на GPU
+            # Настройка max_memory для CPU overflow
+            max_memory = None
+            if self.device == "cuda":
+                from app.config import get_settings
+                settings = get_settings()
+                gpu_mem = f"{settings.whisper_max_gpu_memory_gb}GB"
+                cpu_mem = f"{settings.cpu_offload_memory_gb}GB"
+                max_memory = {0: gpu_mem, "cpu": cpu_mem}
+                logger.info(f"Настроено распределение памяти Whisper: {gpu_mem} GPU + {cpu_mem} CPU overflow")
+
+            # Загружаем модель на GPU с автоматическим распределением
             self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 self.model_name,
                 cache_dir=self.cache_dir,
                 torch_dtype=torch_dtype,
                 low_cpu_mem_usage=True,
-                use_safetensors=True
+                use_safetensors=True,
+                device_map="auto",
+                max_memory=max_memory
             )
 
             # Переводим модель в режим инференса
             self.model.eval()
-
-            # Переносим на устройство
-            if self.device == "cuda":
-                self.model = self.model.cuda()
-                if self.use_bfloat16:
-                    self.model = self.model.to(torch.bfloat16)
-                    logger.info("Модель переведена в bfloat16 для экономии памяти")
+            logger.info("Whisper модель распределена между GPU и CPU")
 
             # Применяем BetterTransformer для ускорения (до 1.5x быстрее)
             if self.use_bettertransformer:

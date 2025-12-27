@@ -8,9 +8,11 @@ from typing import Dict
 import logging
 import os
 from pathlib import Path
+import asyncio
 
 from app.models.mms_tts import MMSTTS
 from app.config import get_settings
+from app.utils import log_gpu_memory, auto_unload_old_models_if_needed
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tts", tags=["TTS (Text-to-Speech)"])
@@ -31,7 +33,9 @@ def get_tts_model() -> MMSTTS:
             use_bfloat16=settings.tts_use_bfloat16,
             sample_rate=settings.tts_sample_rate
         )
-        tts_model.load()
+        # Загружаем только если не используется lazy loading
+        if not settings.lazy_loading:
+            tts_model.load()
     return tts_model
 
 
@@ -68,7 +72,22 @@ async def synthesize_speech(request: TTSRequest, background_tasks: BackgroundTas
     try:
         # Получаем модель и синтезируем речь
         model = get_tts_model()
-        file_path, metadata = model.predict(request.text)
+
+        # Загружаем модель если еще не загружена (lazy loading)
+        if not model.is_loaded():
+            logger.info("Загрузка TTS модели по требованию...")
+
+            # КРИТИЧНО: Проверяем память и выгружаем старые модели если нужно
+            await asyncio.to_thread(auto_unload_old_models_if_needed, required_gb=1.5)
+
+            await asyncio.to_thread(model.load)
+            log_gpu_memory("После загрузки TTS:")
+
+        # Обновляем время последнего использования
+        model.update_last_used()
+
+        # Синтез речи в отдельном потоке (не блокирует event loop)
+        file_path, metadata = await asyncio.to_thread(model.predict, request.text)
 
         # Добавляем задачу на удаление файла после отправки
         background_tasks.add_task(cleanup_file, file_path)

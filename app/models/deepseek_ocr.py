@@ -94,12 +94,25 @@ class DeepSeekOCR(BaseModel):
             # Загружаем модель на GPU с оптимизациями
             torch_dtype = torch.bfloat16 if (self.device == "cuda" and self.use_bfloat16) else torch.float32
 
+            # Настройка max_memory для использования CPU как overflow
+            max_memory = None
+            if self.device == "cuda":
+                from app.config import get_settings
+                settings = get_settings()
+                gpu_mem = f"{settings.ocr_max_gpu_memory_gb}GB"
+                cpu_mem = f"{settings.cpu_offload_memory_gb}GB"
+                max_memory = {0: gpu_mem, "cpu": cpu_mem}
+                logger.info(f"Настроено распределение памяти OCR: {gpu_mem} GPU + {cpu_mem} CPU overflow")
+
             self.model = AutoModel.from_pretrained(
                 self.model_name,
                 cache_dir=self.cache_dir,
                 trust_remote_code=True,
                 use_safetensors=True,
-                torch_dtype=torch_dtype
+                torch_dtype=torch_dtype,
+                device_map="auto",
+                max_memory=max_memory,
+                offload_folder="./offload_cache"  # Папка для offload на диск если нужно
             )
 
             # Настраиваем generation_config модели
@@ -112,14 +125,10 @@ class DeepSeekOCR(BaseModel):
                 if hasattr(self.model.generation_config, 'do_sample'):
                     self.model.generation_config.do_sample = None
 
-            # Переводим модель в режим инференса и на устройство
+            # Переводим модель в режим инференса
+            # НЕ вызываем .cuda() - device_map="auto" уже распределил модель
             self.model = self.model.eval()
-            if self.device == "cuda":
-                self.model = self.model.cuda()
-                # Явно применяем bfloat16 если включено (как в документации)
-                if self.use_bfloat16:
-                    self.model = self.model.to(torch.bfloat16)
-                    logger.info("Модель переведена в bfloat16 для экономии памяти и ускорения")
+            logger.info("Модель распределена между GPU и CPU автоматически")
 
             # Применяем torch.compile для ускорения (если включено)
             if self.use_torch_compile and self.device == "cuda":

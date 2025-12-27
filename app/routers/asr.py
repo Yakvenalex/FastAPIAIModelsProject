@@ -4,9 +4,11 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, status
 from typing import Dict
 import logging
+import asyncio
 
 from app.models.whisper_asr import WhisperASR
 from app.config import get_settings
+from app.utils import log_gpu_memory, auto_unload_old_models_if_needed
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/asr", tags=["ASR (Speech Recognition)"])
@@ -29,13 +31,16 @@ def get_asr_model() -> WhisperASR:
             batch_size=settings.whisper_batch_size,
             use_bettertransformer=settings.whisper_use_bettertransformer
         )
-        asr_model.load()
+        # Загружаем только если не используется lazy loading
+        if not settings.lazy_loading:
+            asr_model.load()
     return asr_model
 
 
 @router.post("/transcribe", response_model=Dict)
 async def transcribe_audio(
-    file: UploadFile = File(..., description="Аудиофайл (WAV, MP3, FLAC, OGG, M4A, и др.)")
+    file: UploadFile = File(..., description="Аудиофайл (WAV, MP3, FLAC, OGG, M4A, и др.)"),
+    normalize: bool = False
 ) -> Dict:
     """
     Распознавание речи из аудиофайла (автоматическое распознавание речи)
@@ -45,13 +50,17 @@ async def transcribe_audio(
 
     Args:
         file: Загруженный аудиофайл (поддерживаются форматы: WAV, MP3, FLAC, OGG, M4A и др.)
+        normalize: Если True, текст будет нормализован через LLM (пунктуация, форматирование)
 
     Returns:
         Словарь с результатами распознавания:
         {
-            "filename": "audio.mp3",
+            "text": "Оригинальный распознанный текст",
+            "normalized_text": "Нормализованный текст" или null,
+            "normalized": true/false,
+            "status": "success",
             "content_type": "audio/mpeg",
-            "full_text": "Полный распознанный текст",
+            "filename": "audio.mp3",
             "duration": 123.45,
             "num_chunks": 3,
             "chunks": [
@@ -59,11 +68,12 @@ async def transcribe_audio(
                     "chunk_index": 0,
                     "start_time": 0.0,
                     "end_time": 60.0,
-                    "text": "Текст первой минуты"
+                    "text": "Оригинальный текст чанка" (только если normalize=false),
+                    "original_text": "Оригинальный текст чанка" (если normalize=true),
+                    "normalized_text": "Нормализованный текст чанка" (если normalize=true)
                 },
                 ...
-            ],
-            "status": "success"
+            ]
         }
     """
     # Проверяем тип файла (поддерживаем основные аудио форматы)
@@ -108,12 +118,93 @@ async def transcribe_audio(
 
         # Получаем модель и выполняем распознавание
         model = get_asr_model()
-        result = model.predict(contents, filename=file.filename or "")
 
-        # Добавляем метаинформацию
-        result["filename"] = file.filename
-        result["content_type"] = file.content_type
+        # Загружаем модель если еще не загружена (lazy loading)
+        if not model.is_loaded():
+            logger.info("Загрузка ASR модели по требованию...")
+
+            # КРИТИЧНО: Проверяем память и выгружаем старые модели если нужно
+            await asyncio.to_thread(auto_unload_old_models_if_needed, required_gb=2.5)
+
+            await asyncio.to_thread(model.load)
+            log_gpu_memory("После загрузки ASR:")
+
+        # Обновляем время последнего использования
+        model.update_last_used()
+
+        # Распознавание речи в отдельном потоке (не блокирует event loop)
+        result = await asyncio.to_thread(model.predict, contents, file.filename or "")
+
+        # Сохраняем оригинальные тексты
+        original_full_text = result.get("full_text", "")
+        normalized_full_text = None
+
+        # Нормализация текста через Chat модель если запрошено
+        if normalize and original_full_text and original_full_text.strip():
+            from app.routers.chat import get_chat_model
+
+            logger.info("Нормализация распознанной речи через Chat модель...")
+            chat_model = get_chat_model()
+
+            # Загружаем chat модель если нужно
+            if not chat_model.is_loaded():
+                logger.info("Загрузка Chat модели для нормализации...")
+                await asyncio.to_thread(auto_unload_old_models_if_needed, required_gb=3.0)
+                await asyncio.to_thread(chat_model.load)
+                log_gpu_memory("После загрузки Chat для нормализации:")
+
+            chat_model.update_last_used()
+
+            # Промпт для нормализации ASR текста
+            normalization_prompt = """Ты опытный редактор текста. Твоя задача - исправить и улучшить текст, полученный из системы распознавания речи.
+
+Что нужно сделать:
+1. Добавить правильную пунктуацию (точки, запятые, знаки вопроса и т.д.)
+2. Расставить заглавные буквы в начале предложений и в именах собственных
+3. Исправить очевидные ошибки распознавания слов
+4. Разбить текст на абзацы если это уместно
+5. Убрать слова-паразиты и повторы ТОЛЬКО если они явно мешают пониманию
+6. НЕ менять смысл и содержание, только улучшать читаемость
+
+Верни ТОЛЬКО исправленный текст, без комментариев и пояснений."""
+
+            # Нормализация полного текста в отдельном потоке
+            normalized_full_text = await asyncio.to_thread(
+                chat_model.chat,
+                user_message=f"Текст для нормализации:\n\n{original_full_text}",
+                system_prompt=normalization_prompt,
+                temperature=0.3,  # Низкая температура для точности
+                max_new_tokens=2048
+            )
+            normalized_full_text = normalized_full_text.strip()
+
+            # Также нормализуем текст в чанках если они есть
+            if "chunks" in result and result["chunks"]:
+                for chunk in result["chunks"]:
+                    if chunk.get("text"):
+                        chunk["original_text"] = chunk["text"]
+                        chunk_normalized = await asyncio.to_thread(
+                            chat_model.chat,
+                            user_message=f"Текст для нормализации:\n\n{chunk['text']}",
+                            system_prompt=normalization_prompt,
+                            temperature=0.3,
+                            max_new_tokens=1024
+                        )
+                        chunk["normalized_text"] = chunk_normalized.strip()
+
+            logger.info("Текст успешно нормализован")
+
+        # Формируем финальный результат
+        result["text"] = original_full_text
+        result["normalized_text"] = normalized_full_text
+        result["normalized"] = normalize
         result["status"] = "success"
+        result["content_type"] = file.content_type
+        result["filename"] = file.filename
+
+        # Удаляем старое поле full_text для консистентности
+        if "full_text" in result:
+            del result["full_text"]
 
         return result
 
